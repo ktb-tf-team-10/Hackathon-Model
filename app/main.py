@@ -53,7 +53,7 @@ except Exception:
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gemini_text_api import generate_wedding_texts
-# from nanobanana_api import generate_invitation_with_nanobanana
+from nanobanana_api import generate_invitation_with_nanobanana
 from gemini_invitation_api import generate_invitation_with_gemini
 from imagen_design_api import generate_invitation_design
 
@@ -154,6 +154,9 @@ async def generate_invitation_test(
     bride_mother: Optional[str] = Form(""),
     latitude: Optional[float] = Form(None),
     longitude: Optional[float] = Form(None),
+    prompt_override_1: Optional[str] = Form(None),
+    prompt_override_2: Optional[str] = Form(None),
+    prompt_override_3: Optional[str] = Form(None),
 ):
     """
     청첩장 이미지 생성 테스트 API (나노바나나 vs Gemini Flash 2.5 vs Gemini 3.0)
@@ -173,7 +176,28 @@ async def generate_invitation_test(
 
         if model_type == "nanobanana":
             # 나노바나나 대신 Imagen으로 대체 가능성 염두에 둠
-            result = {"error": "Nanobanana is currently disabled due to SSL issues."}
+            # 나노바나나 (Local Tuning Mode with Gemini)
+            result = generate_invitation_with_nanobanana(
+                groom_name=groom_name,
+                bride_name=bride_name,
+                groom_father=groom_father,
+                groom_mother=groom_mother,
+                bride_father=bride_father,
+                bride_mother=bride_mother,
+                venue=venue,
+                venue_address=address,
+                wedding_date=wedding_date,
+                wedding_time=wedding_time,
+                wedding_image_base64=wedding_image_base64,
+                tone=tone,
+                style_image_base64=style_image_base64,
+                border_design_id=border_design_id,
+                venue_latitude=latitude,
+                venue_longitude=longitude,
+                prompt_override_1=prompt_override_1,
+                prompt_override_2=prompt_override_2,
+                prompt_override_3=prompt_override_3
+            )
         elif model_type == "flash2.5" or model_type == "imagen-4.0-generate":
             # Flash 2.5 또는 Imagen 4.0 시도
             # imagen_design_api.py 내부에서 fallback 로직이 작동합니다.
