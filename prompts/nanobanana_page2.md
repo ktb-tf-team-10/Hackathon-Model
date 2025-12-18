@@ -1,7 +1,6 @@
 **Page 2 - Greeting & Invitation:**
 - Tone: {tone}
 - Style: Based on the provided style reference image
-- Frame: {border_design_id} border around the entire page
 - Text content (in Korean, centered):
   * Greeting: {texts[greeting]}
   * Invitation: {texts[invitation]}

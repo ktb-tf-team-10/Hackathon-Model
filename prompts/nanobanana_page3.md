@@ -1,6 +1,6 @@
 **Page 3 - Venue Information:**
 - Tone: {tone}
-- Style: Based on the provided style reference image with {border_design_id} frame
+- Style: Based on the provided style reference image
 - Content:
   * Venue: {venue}
   * Address: {venue_address}

@@ -1,17 +1,19 @@
 """
 나노바나나(Nanobanana) API를 사용한 청첩장 생성 (Local Tuning Mode)
 Gemini 3.0 Pro Image Preview 모델을 사용하여 로컬에서 프롬프트 튜닝을 진행합니다.
-이미지는 로컬 스토리지에 저장됩니다.
+이미지는 S3에 저장됩니다.
 """
 
 import os
 import json
 import base64
+import time
 from typing import Dict, List
 import requests
 import uuid
 import ssl
 import certifi
+import boto3
 from dotenv import load_dotenv
 from google.genai import types, Client
 from PIL import Image
@@ -30,32 +32,37 @@ except ImportError:
     os.environ['SSL_CERT_FILE'] = certifi.where()
     os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
-# 로컬 이미지 저장 경로 설정
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-GENERATED_IMAGES_DIR = os.path.join(STATIC_DIR, "generated_images")
-if not os.path.exists(GENERATED_IMAGES_DIR):
-    os.makedirs(GENERATED_IMAGES_DIR)
+# AWS S3 설정
+S3_BUCKET = os.environ.get('S3_BUCKET')
+S3_REGION = os.environ.get('S3_REGION', 'ap-northeast-2')
+CLOUD_FRONT_DOMAIN = os.environ.get('CLOUD_FRONT_DOMAIN')
 
-def save_locally(image_bytes: bytes, file_type: str = "invitation") -> str:
+s3_client = boto3.client('s3', region_name=S3_REGION)
+
+
+def save_to_s3(image_bytes: bytes, file_type: str = "invitation") -> str:
     """
-    생성된 이미지를 로컬에 저장하고 URL 반환
+    생성된 이미지를 S3에 업로드하고 CloudFront URL 반환
 
     Args:
         image_bytes: 이미지 바이트
         file_type: 파일 타입
 
     Returns:
-        str: 로컬 서버 URL (http://localhost:8000/static/generated_images/...)
+        str: CloudFront URL
     """
-    filename = f"{file_type}_{uuid.uuid4()}.jpg"
-    file_path = os.path.join(GENERATED_IMAGES_DIR, filename)
-    
-    with open(file_path, "wb") as f:
-        f.write(image_bytes)
-    
-    # 로컬 호스트 URL 반환 (Frontend에서 접근 가능하도록)
-    # 실제 배포 시에는 도메인으로 변경 필요
-    return f"http://localhost:8000/static/generated_images/{filename}"
+    timestamp = int(time.time())
+    filename = f"invitations/{file_type}_{timestamp}_{uuid.uuid4().hex[:8]}.png"
+
+    buffer = io.BytesIO(image_bytes)
+    s3_client.upload_fileobj(
+        buffer,
+        S3_BUCKET,
+        filename,
+        ExtraArgs={"ContentType": "image/png"}
+    )
+
+    return f"{CLOUD_FRONT_DOMAIN}/{filename}"
 
 
 def generate_wedding_texts_with_gemini(
@@ -125,9 +132,8 @@ def generate_invitation_with_nanobanana(
     wedding_image_base64: str,
     # STEP 3: 톤
     tone: str,
-    # STEP 4: 스타일 + 테두리
+    # STEP 4: 스타일 이미지
     style_image_base64: str,
-    border_design_id: str,
     # 선택사항
     venue_latitude: str = None,
     venue_longitude: str = None,
@@ -196,8 +202,7 @@ def generate_invitation_with_nanobanana(
             venue_address=venue_address,
             wedding_date=wedding_date,
             wedding_time=wedding_time,
-            tone=tone,
-            border_design_id=border_design_id
+            tone=tone
         )
 
         # 이미지 입력 로직 (Sequential Editing)
@@ -231,7 +236,7 @@ def generate_invitation_with_nanobanana(
         
         if generated_images:
             image_bytes = generated_images[0]
-            image_url = save_locally(image_bytes, f"invitation-page{i+1}")
+            image_url = save_to_s3(image_bytes, f"nanobanana-page{i+1}")
             
             # 다음 단계를 위해 저장
             previous_generated_image_bytes = image_bytes
