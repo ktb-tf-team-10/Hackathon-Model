@@ -39,8 +39,7 @@ class GenerateInvitationRequest(BaseModel):
     extraMessage: Optional[str] = ""
     additionalRequest: Optional[str] = ""
     tone: Optional[str] = "WARM"
-    frame: Optional[str] = "CLASSIC"
-    modelName: Optional[str] = "models/gemini-3-pro-image-preview"
+    # frame: Optional[str] = "CLASSIC"
 
 
 # 전역 SSL 인증서 검증 비활성화
@@ -240,7 +239,7 @@ async def generate_invitation_test(
 @app.post("/api/generate-invitation")
 async def generate_invitation(request: GenerateInvitationRequest):
     """
-    청첩장 이미지 생성 API
+    청첩장 이미지 생성 API (나노바나나 사용)
 
     Request Body:
     {
@@ -252,7 +251,7 @@ async def generate_invitation(request: GenerateInvitationRequest):
         "extraMessage": "주차 공간이 협소합니다",
         "additionalRequest": "잔잔한 분위기",
         "tone": "WARM",
-        "frame": "CLASSIC"
+        # "frame": "CLASSIC"
     }
     """
     print(f"DEBUG: request={request}")
@@ -262,9 +261,8 @@ async def generate_invitation(request: GenerateInvitationRequest):
         wedding_image_base64 = download_image_as_base64(request.weddingImageUrl)
         style_image_base64 = download_image_as_base64(request.styleImageUrl)
 
-        # 1. 먼저 Gemini로 문구 생성
-        texts_result = generate_wedding_texts(
-            tone=request.tone,
+        # 나노바나나로 청첩장 생성 (문구 생성 + 이미지 생성 통합)
+        result = generate_invitation_with_nanobanana(
             groom_name=request.groom.name,
             bride_name=request.bride.name,
             groom_father=request.groom.fatherName,
@@ -272,37 +270,18 @@ async def generate_invitation(request: GenerateInvitationRequest):
             bride_father=request.bride.fatherName,
             bride_mother=request.bride.motherName,
             venue=request.wedding.hallName,
+            venue_address=request.wedding.address,
             wedding_date=request.wedding.date,
             wedding_time=request.wedding.time,
-            address=request.wedding.address
-        )
-
-        # 2. 이미지 생성용 텍스트 구성
-        processed_texts = {
-            "greeting": texts_result.get("greetings", [""])[0],
-            "invitation": texts_result.get("invitations", [""])[0],
-            "location": texts_result.get("location", ""),
-            "closing": texts_result.get("closing", [""])[0],
-            "extraMessage": request.extraMessage,
-            "additionalRequest": request.additionalRequest
-        }
-
-        venue_info = {
-            "name": request.wedding.hallName,
-            "address": request.wedding.address
-        }
-
-        # Imagen/Gemini 디자인 생성 (이미 S3에 업로드됨)
-        result = await generate_invitation_design(
-            style_image_base64=style_image_base64,
             wedding_image_base64=wedding_image_base64,
-            texts=processed_texts,
-            venue_info=venue_info,
-            model_name=request.modelName
+            tone=request.tone,
+            style_image_base64=style_image_base64
+            # border_design_id=request.frame
         )
 
         # 이미지 URL 추출 (이미 CloudFront URL)
         image_urls = [page.get("image_url", "") for page in result.get("pages", [])]
+        texts = result.get("texts", {})
 
         print(f"✅ 생성 완료: {image_urls}")
 
@@ -311,7 +290,7 @@ async def generate_invitation(request: GenerateInvitationRequest):
             "success": True,
             "data": {
                 "imageUrls": image_urls,
-                "texts": processed_texts
+                "texts": texts
             }
         }
 
