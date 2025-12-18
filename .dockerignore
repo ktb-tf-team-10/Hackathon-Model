@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+.idea
+.vscode
+*.md
+static/generated_images/*
+.github
