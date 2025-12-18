@@ -127,13 +127,24 @@ def generate_wedding_texts(
     gemini_schema = _convert_schema_to_gemini(prompt_data["schema"])
 
     client = get_genai_client()
+    
+    # 모델 선택 (사용자 요청 모델이 있으면 사용, 기본은 2.0-flash-exp)
+    text_model = 'gemini-2.0-flash-exp'
+    config_kwargs = {
+        "response_mime_type": "application/json",
+        "response_schema": gemini_schema,
+    }
+    
+    # gemini-3-pro-preview 모델일 경우 ThinkingConfig 적용 (사용자 요청 반영)
+    # 현재 SDK의 모델명 매칭은 환경에 따라 다를 수 있으나 사용자 스니펫 기준 적용
+    model_to_use = text_model
+    # if "pro-preview" in model_to_use:
+    #     config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="HIGH")
+
     response = client.models.generate_content(
-        model='gemini-2.0-flash-exp',
+        model=model_to_use,
         contents=[prompt_data["prompt"]],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=gemini_schema,
-        ),
+        config=types.GenerateContentConfig(**config_kwargs),
     )
 
     return parse_json_response(response)

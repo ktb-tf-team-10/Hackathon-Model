@@ -56,10 +56,11 @@ def _build_client(api_key: str) -> genai.Client:
     print(f"🔧 Gemini Client initializing (SSL Verification Disabled)")
 
     # 3. HTTP 클라이언트 설정
-    # 400 INVALID_ARGUMENT (Unknown name "responseMimeType") 해결을 위해 v1alpha로 복구
-    # gemini-2.0-flash-exp 모델은 v1alpha에서 가장 잘 작동합니다.
+    # v1alpha에서 일부 모델(imagen-3.0-generate-002 등)이 404가 발생할 수 있어
+    # 더 넓은 모델 범위를 지원하는 v1beta 또는 기본 설정을 고려합니다.
+    # gemini-2.0-flash-exp의 responseMimeType 등을 위해 v1beta를 사용합니다.
     http_options = {
-        "api_version": "v1alpha", 
+        "api_version": "v1beta", 
     }
 
     return genai.Client(

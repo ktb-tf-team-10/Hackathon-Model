@@ -348,9 +348,15 @@ def _call_nanobanana_api(
 
     # 강력한 SSL 무시 설정을 위해 세션 및 어댑터 사용
     session = requests.Session()
+    
+    # TLSV1_UNRECOGNIZED_NAME 해결을 위한 추가 설정
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
     try:
         try:
             from utils.ssl_fix import TLSAdapter
+            # TLSAdapter 내부에서 SNI 비활성화 및 CERT_NONE 설정이 수행됨
             session.mount('https://', TLSAdapter())
         except ImportError:
             pass

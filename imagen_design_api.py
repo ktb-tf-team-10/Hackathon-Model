@@ -1,20 +1,20 @@
 """
-Google Imagen 3 API를 사용한 청첩장 디자인 생성
-STEP 5-6: 스타일 참조 이미지 + 사용자 이미지 + 문구를 바탕으로 청첩장 디자인 생성
+Google Imagen 및 Gemini API를 사용한 청첩장 디자인 생성
+다양한 모델을 선택하여 테스트할 수 있도록 구성되었습니다.
 """
 
 import os
 import json
 import base64
-from typing import Dict, List, Optional
-import requests
-from google.cloud import aiplatform
-from google.cloud.aiplatform.gapic.schema import predict
+import asyncio
+from typing import Dict, List, Optional, Any
 import boto3
-from io import BytesIO
-from PIL import Image
 import uuid
 from dotenv import load_dotenv
+from google.genai import types
+
+# 프로젝트 내부 유틸리티 사용
+from utils.genai_client import get_genai_client
 
 # .env 파일 로드
 load_dotenv()
@@ -29,369 +29,168 @@ s3_client = boto3.client(
 
 BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'wedding-invitation-images')
 
-# Google Cloud 설정
-PROJECT_ID = os.environ.get('GOOGLE_CLOUD_PROJECT_ID')
-LOCATION = 'us-central1'
-aiplatform.init(project=PROJECT_ID, location=LOCATION)
+# 로컬 저장 경로 설정
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+GENERATED_DIR = os.path.join(STATIC_DIR, "generated_images")
 
+# 서버 URL 설정 (환경 변수에서 가져오거나 기본값 사용)
+MODEL_SERVER_URL = os.environ.get('MODEL_SERVER_URL', 'http://localhost:8102')
+
+def save_locally(image_bytes: bytes, file_type: str = "design") -> str:
+    """
+    생성된 이미지를 로컬 파일 시스템에 저장하고 URL을 반환
+    """
+    if not os.path.exists(GENERATED_DIR):
+        os.makedirs(GENERATED_DIR, exist_ok=True)
+        
+    filename = f"{file_type}_{uuid.uuid4()}.png"
+    filepath = os.path.join(GENERATED_DIR, filename)
+    
+    with open(filepath, "wb") as f:
+        f.write(image_bytes)
+        
+    # 클라이언트가 접근 가능한 URL 반환
+    return f"{MODEL_SERVER_URL}/static/generated_images/{filename}"
 
 def upload_to_s3(image_bytes: bytes, file_type: str = "design") -> str:
-    """
-    생성된 이미지를 S3에 업로드
-
-    Args:
-        image_bytes: 이미지 바이트
-        file_type: 파일 타입 (design, edited, etc.)
-
-    Returns:
-        str: S3 URL
-    """
     file_key = f"{file_type}/{uuid.uuid4()}.png"
-
     s3_client.put_object(
         Bucket=BUCKET_NAME,
         Key=file_key,
         Body=image_bytes,
         ContentType='image/png'
     )
+    return f"https://{BUCKET_NAME}.s3.ap-northeast-2.amazonaws.com/{file_key}"
 
-    image_url = f"https://{BUCKET_NAME}.s3.ap-northeast-2.amazonaws.com/{file_key}"
-    return image_url
-
-
-def generate_invitation_design(
+async def generate_invitation_design(
     style_image_base64: str,
     wedding_image_base64: str,
     texts: Dict[str, str],
     design_request: str = "",
-    venue_info: Dict[str, str] = None
+    venue_info: Dict[str, str] = None,
+    model_name: str = "gemini-3-pro-image-preview"  # 기본 모델
 ) -> Dict[str, any]:
     """
-    Imagen 3를 사용하여 청첩장 디자인 생성
-
+    청첩장 디자인 생성 (병렬 처리)
+    
     Args:
-        style_image_base64: 스타일 참조 이미지 (base64)
-        wedding_image_base64: STEP4에서 업로드한 웨딩 사진 (base64)
-        texts: STEP2,3에서 선택한 문구들
-            {
-                "greeting": "인사말",
-                "invitation": "초대문구",
-                "location": "장소안내",
-                "closing": "마무리인사"
-            }
-        design_request: 추가 디자인 요청사항 (선택)
-        venue_info: 예식장 정보 (지도 생성용)
-            {
-                "name": "예식장명",
-                "address": "주소",
-                "latitude": "위도",
-                "longitude": "경도"
-            }
-
-    Returns:
-        Dict: {
-            "pages": [
-                {"page_number": 1, "image_url": "S3 URL", "type": "cover"},
-                {"page_number": 2, "image_url": "S3 URL", "type": "greeting"},
-                ...
-            ]
-        }
+        model_name: 사용할 모델명 (gemini-3-pro-image-preview, imagen-4.0-generate-001 등)
     """
-
-    # 프롬프트 파일 읽기
-    prompt_path = os.path.join(os.path.dirname(__file__), "prompts", "image_generation_prompt.md")
-    with open(prompt_path, 'r', encoding='utf-8') as f:
-        base_prompt = f.read()
-
-    # 5개 페이지 생성
-    pages = []
-
-    # 1. 커버 페이지 (웨딩 사진)
-    page1_prompt = base_prompt.format(
-        page_type="웨딩 사진 커버 페이지",
-        style_description="스타일 참조 이미지를 기반으로 한 디자인",
-        main_content=f"중앙에 웨딩 사진 배치",
-        additional_elements="우아한 테두리와 장식",
-        text_content="",
-        design_notes=design_request if design_request else "깔끔하고 모던한 디자인"
-    )
-
-    page1_url = _generate_single_page(page1_prompt, wedding_image_base64, style_image_base64)
-    pages.append({
-        "page_number": 1,
-        "image_url": page1_url,
-        "type": "cover",
-        "description": "웨딩 사진 커버"
-    })
+    
+    tasks = []
+    
+    # 1. 커버 페이지
+    page1_prompt = f"Wedding invitation cover. Style: Reference. Content: Couple photo. {design_request}"
+    tasks.append(_generate_single_page_task(page1_prompt, wedding_image_base64, style_image_base64, 1, "cover", "웨딩 사진 커버", model_name))
 
     # 2. 인사말 페이지
-    page2_prompt = base_prompt.format(
-        page_type="인사말 페이지",
-        style_description="스타일 참조 이미지의 폰트와 색상 적용",
-        main_content="인사말 텍스트",
-        additional_elements="꽃 장식 또는 패턴",
-        text_content=texts.get('greeting', ''),
-        design_notes="가독성 좋은 폰트 사용"
-    )
-
-    page2_url = _generate_single_page(page2_prompt, None, style_image_base64)
-    pages.append({
-        "page_number": 2,
-        "image_url": page2_url,
-        "type": "greeting",
-        "description": "인사말"
-    })
+    page2_prompt = f"Wedding greeting page. Text: {texts.get('greeting', '')}. Style: Reference."
+    tasks.append(_generate_single_page_task(page2_prompt, None, style_image_base64, 2, "greeting", "인사말", model_name))
 
     # 3. 초대 문구 페이지
-    page3_prompt = base_prompt.format(
-        page_type="초대 문구 페이지",
-        style_description="스타일 참조 이미지와 일관된 디자인",
-        main_content="초대 문구",
-        additional_elements="우아한 라인과 장식",
-        text_content=texts.get('invitation', ''),
-        design_notes="따뜻하고 환영하는 느낌"
-    )
+    page3_prompt = f"Wedding invitation text page. Text: {texts.get('invitation', '')}. Style: Reference."
+    tasks.append(_generate_single_page_task(page3_prompt, None, style_image_base64, 3, "invitation", "초대 문구", model_name))
 
-    page3_url = _generate_single_page(page3_prompt, None, style_image_base64)
-    pages.append({
-        "page_number": 3,
-        "image_url": page3_url,
-        "type": "invitation",
-        "description": "초대 문구"
-    })
-
-    # 4. 장소 안내 페이지 (지도 포함)
-    map_image = None
-    if venue_info:
-        map_image = _generate_map_image(venue_info)
-
-    page4_prompt = base_prompt.format(
-        page_type="장소 안내 페이지",
-        style_description="스타일 참조 이미지 기반",
-        main_content="장소 안내 문구 + 지도",
-        additional_elements="찾아오시는 길 아이콘",
-        text_content=texts.get('location', ''),
-        design_notes="지도와 텍스트의 조화"
-    )
-
-    page4_url = _generate_single_page(page4_prompt, map_image, style_image_base64)
-    pages.append({
-        "page_number": 4,
-        "image_url": page4_url,
-        "type": "location",
-        "description": "장소 안내 + 지도"
-    })
+    # 4. 장소 안내 페이지
+    page4_prompt = f"Wedding venue info page. Text: {texts.get('location', '')}. Style: Reference."
+    tasks.append(_generate_single_page_task(page4_prompt, None, style_image_base64, 4, "location", "장소 안내", model_name))
 
     # 5. 마무리 인사 페이지
-    page5_prompt = base_prompt.format(
-        page_type="마무리 인사 페이지",
-        style_description="스타일 참조 이미지와 일관",
-        main_content="마무리 인사",
-        additional_elements="감사 인사와 장식",
-        text_content=texts.get('closing', ''),
-        design_notes="따뜻하고 감사한 느낌"
-    )
+    page5_prompt = f"Wedding closing page. Text: {texts.get('closing', '')}. Style: Reference."
+    tasks.append(_generate_single_page_task(page5_prompt, None, style_image_base64, 5, "closing", "마무리 인사", model_name))
 
-    page5_url = _generate_single_page(page5_prompt, None, style_image_base64)
-    pages.append({
-        "page_number": 5,
-        "image_url": page5_url,
-        "type": "closing",
-        "description": "마무리 인사"
-    })
+    # 모든 페이지 병렬 생성
+    pages = await asyncio.gather(*tasks)
+    
+    return {
+        "pages": sorted(pages, key=lambda x: x["page_number"]),
+        "model_used": model_name
+    }
 
-    return {"pages": pages}
+async def _generate_single_page_task(prompt, content_img, style_img, page_num, p_type, desc, model_name):
+    """병렬 실행을 위한 래퍼 함수"""
+    loop = asyncio.get_event_loop()
+    url = await loop.run_in_executor(None, _generate_single_page_sync, prompt, content_img, style_img, model_name)
+    return {
+        "page_number": page_num,
+        "image_url": url,
+        "type": p_type,
+        "description": desc
+    }
 
+def _generate_single_page_sync(prompt: str, content_image_base64: Optional[str], style_image_base64: str, model_name: str) -> str:
+    client = get_genai_client()
+    
+    # 모델명에 접두어가 없으면 추가 (test.sh 결과 반영)
+    if not model_name.startswith("models/"):
+        full_model_name = f"models/{model_name}"
+    else:
+        full_model_name = model_name
 
-def _generate_single_page(
-    prompt: str,
-    content_image_base64: Optional[str],
-    style_image_base64: str
-) -> str:
-    """
-    Imagen 3를 사용하여 단일 페이지 생성
+    try:
+        if "imagen" in full_model_name.lower():
+            print(f"🎨 [Page] Requesting Imagen 4.0: {full_model_name}")
+            
+            # 사용자 제공 Imagen 4.0 설정 적용
+            config = dict(
+                number_of_images=1,
+                output_mime_type="image/png",
+                person_generation="ALLOW_ALL",
+                aspect_ratio="3:4",
+                image_size="1K",
+            )
+            
+            result = client.models.generate_images(
+                model=full_model_name,
+                prompt=f"{prompt}. Professional wedding invitation card design. High quality.",
+                config=config
+            )
+            
+            if result.generated_images:
+                from io import BytesIO
+                img_buffer = BytesIO()
+                result.generated_images[0].image.save(img_buffer, format='PNG')
+                url = save_locally(img_buffer.getvalue(), "design-imagen")
+                print(f"✅ [Page] Imagen success: {url}")
+                return url
+                
+        else:
+            print(f"🚀 [Page] Requesting Gemini 3 Pro: {full_model_name}")
+            
+            parts = [types.Part.from_text(text=f"{prompt}. Create a professional wedding invitation card image. 3:4 aspect ratio.")]
+            if style_image_base64:
+                parts.append(types.Part.from_bytes(data=base64.b64decode(style_image_base64), mime_type="image/png"))
+            if content_image_base64:
+                parts.append(types.Part.from_bytes(data=base64.b64decode(content_image_base64), mime_type="image/png"))
 
-    Args:
-        prompt: 생성 프롬프트
-        content_image_base64: 컨텐츠 이미지 (웨딩 사진, 지도 등)
-        style_image_base64: 스타일 참조 이미지
+            # 사용자 제공 Gemini 3 Pro 설정 반영
+            tools = [types.Tool(googleSearch=types.GoogleSearch())]
+            generate_content_config = types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+                image_config=types.ImageConfig(image_size="1K"),
+                tools=tools
+            )
 
-    Returns:
-        str: S3 URL
-    """
+            response = client.models.generate_content(
+                model=full_model_name,
+                contents=[types.Content(role="user", parts=parts)],
+                config=generate_content_config
+            )
+            
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.inline_data:
+                        url = save_locally(part.inline_data.data, "design-gemini")
+                        print(f"✅ [Page] Gemini success: {url}")
+                        return url
+            
+    except Exception as e:
+        print(f"❌ [Page] Failed with {full_model_name}: {e}")
+        # 재귀적 Fallback 방지 및 최종 수단
+        if "imagen" in full_model_name.lower():
+            print("🔄 Falling back to models/gemini-3-pro-image-preview...")
+            return _generate_single_page_sync(prompt, content_image_base64, style_image_base64, "models/gemini-3-pro-image-preview")
 
-    # Imagen 3 API 엔드포인트
-    endpoint = aiplatform.Endpoint(
-        endpoint_name=f"projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/imagen-3.0-generate-001"
-    )
-
-    # 이미지 생성 요청
-    instances = [
-        {
-            "prompt": prompt,
-            "image": {
-                "bytesBase64Encoded": style_image_base64
-            },
-            "parameters": {
-                "sampleCount": 1,
-                "aspectRatio": "3:4",  # 청첩장 비율
-                "safetySetting": "block_some",
-                "personGeneration": "allow_all"
-            }
-        }
-    ]
-
-    if content_image_base64:
-        instances[0]["image"]["contentImage"] = {
-            "bytesBase64Encoded": content_image_base64
-        }
-
-    response = endpoint.predict(instances=instances)
-
-    # 생성된 이미지 추출
-    generated_image_base64 = response.predictions[0]["bytesBase64Encoded"]
-    image_bytes = base64.b64decode(generated_image_base64)
-
-    # S3에 업로드
-    image_url = upload_to_s3(image_bytes, "design")
-
-    return image_url
-
-
-def _generate_map_image(venue_info: Dict[str, str]) -> str:
-    """
-    Google Maps Static API를 사용하여 지도 이미지 생성
-
-    Args:
-        venue_info: 예식장 정보
-
-    Returns:
-        str: 지도 이미지 base64
-    """
-
-    google_maps_api_key = os.environ.get('GOOGLE_MAPS_API_KEY')
-    lat = venue_info.get('latitude')
-    lng = venue_info.get('longitude')
-    venue_name = venue_info.get('name')
-
-    # Google Maps Static API
-    map_url = f"https://maps.googleapis.com/maps/api/staticmap?center={lat},{lng}&zoom=16&size=600x400&markers=color:red%7C{lat},{lng}&key={google_maps_api_key}"
-
-    response = requests.get(map_url)
-    map_image_base64 = base64.b64encode(response.content).decode('utf-8')
-
-    return map_image_base64
-
-
-def edit_invitation_design(
-    original_design_pages: List[Dict],
-    edit_request: str,
-    reference_image_base64: Optional[str] = None
-) -> Dict[str, any]:
-    """
-    청첩장 부분 수정 (STEP 7)
-
-    Args:
-        original_design_pages: 원본 디자인 페이지들
-        edit_request: 수정 요청사항
-        reference_image_base64: 참고 이미지 (선택)
-
-    Returns:
-        Dict: 수정된 페이지들
-    """
-
-    # 프롬프트에 수정 요청사항 추가
-    edit_prompt = f"""
-    원본 청첩장 디자인을 다음과 같이 수정해주세요:
-
-    수정 요청사항:
-    {edit_request}
-
-    원본 디자인의 전체적인 스타일과 톤은 유지하되, 요청사항만 반영해주세요.
-    """
-
-    # 각 페이지별로 수정 (실제로는 사용자가 특정 페이지만 지정할 수도 있음)
-    edited_pages = []
-
-    for page in original_design_pages:
-        # 원본 이미지 다운로드
-        original_url = page["image_url"]
-        response = requests.get(original_url)
-        original_image_base64 = base64.b64encode(response.content).decode('utf-8')
-
-        # Imagen 3 Edit API 사용
-        edited_url = _edit_single_page(
-            original_image_base64,
-            edit_prompt,
-            reference_image_base64
-        )
-
-        edited_pages.append({
-            **page,
-            "image_url": edited_url,
-            "edited": True
-        })
-
-    return {"pages": edited_pages}
-
-
-def _edit_single_page(
-    original_image_base64: str,
-    edit_prompt: str,
-    reference_image_base64: Optional[str]
-) -> str:
-    """
-    단일 페이지 수정
-
-    Args:
-        original_image_base64: 원본 이미지
-        edit_prompt: 수정 프롬프트
-        reference_image_base64: 참고 이미지
-
-    Returns:
-        str: 수정된 이미지 S3 URL
-    """
-
-    endpoint = aiplatform.Endpoint(
-        endpoint_name=f"projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/imagen-3.0-edit-001"
-    )
-
-    instances = [
-        {
-            "prompt": edit_prompt,
-            "image": {
-                "bytesBase64Encoded": original_image_base64
-            },
-            "parameters": {
-                "sampleCount": 1,
-                "editMode": "inpainting-insert"  # 또는 "inpainting-remove", "product-image"
-            }
-        }
-    ]
-
-    if reference_image_base64:
-        instances[0]["referenceImage"] = {
-            "bytesBase64Encoded": reference_image_base64
-        }
-
-    response = endpoint.predict(instances=instances)
-
-    # 수정된 이미지 추출
-    edited_image_base64 = response.predictions[0]["bytesBase64Encoded"]
-    image_bytes = base64.b64decode(edited_image_base64)
-
-    # S3에 업로드
-    image_url = upload_to_s3(image_bytes, "edited")
-
-    return image_url
-
-
-# 테스트 코드
-if __name__ == "__main__":
-    print("=" * 80)
-    print("Imagen 3 청첩장 디자인 생성 테스트")
-    print("=" * 80)
-
-    # 테스트는 실제 API 키와 이미지가 필요합니다
-    print("\n이 스크립트는 실제 Gemini API 키와 이미지가 필요합니다.")
-    print("FastAPI 서버를 통해 테스트하세요.")
+    print(f"⚠️ [Page] Returning placeholder for failed generation.")
+    return "https://via.placeholder.com/600x800.png?text=Generation+Failed"
