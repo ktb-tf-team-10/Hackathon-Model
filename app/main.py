@@ -3,11 +3,45 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from google.genai import types
 from typing import Optional
+from pydantic import BaseModel
+import requests
 import sys
 import os
 import base64
 import ssl
+
+
+# --- Request DTOs ---
+class GroomDto(BaseModel):
+    name: str
+    fatherName: Optional[str] = ""
+    motherName: Optional[str] = ""
+
+class BrideDto(BaseModel):
+    name: str
+    fatherName: Optional[str] = ""
+    motherName: Optional[str] = ""
+
+class WeddingDto(BaseModel):
+    hallName: str
+    address: str
+    date: str
+    time: str
+
+class GenerateInvitationRequest(BaseModel):
+    groom: GroomDto
+    bride: BrideDto
+    wedding: WeddingDto
+    weddingImageUrl: str
+    styleImageUrl: str
+    extraMessage: Optional[str] = ""
+    additionalRequest: Optional[str] = ""
+    tone: Optional[str] = "WARM"
+    frame: Optional[str] = "CLASSIC"
+    modelName: Optional[str] = "models/gemini-3-pro-image-preview"
+
 
 # 전역 SSL 인증서 검증 비활성화
 try:
@@ -180,97 +214,82 @@ async def generate_invitation_test(
 
 
 @app.post("/api/generate-invitation")
-async def generate_invitation(
-    wedding_image: Optional[UploadFile] = File(None),
-    style_image: Optional[UploadFile] = File(None),
-    tone: Optional[str] = Form(None),
-    groom_name: Optional[str] = Form(None),
-    bride_name: Optional[str] = Form(None),
-    venue: Optional[str] = Form(None),
-    wedding_date: Optional[str] = Form(None),
-    wedding_time: Optional[str] = Form(None),
-    address: Optional[str] = Form(None),
-    border_design_id: Optional[str] = Form(None),
-    groom_father: Optional[str] = Form(""),
-    groom_mother: Optional[str] = Form(""),
-    bride_father: Optional[str] = Form(""),
-    bride_mother: Optional[str] = Form(""),
-    latitude: Optional[float] = Form(None),
-    longitude: Optional[float] = Form(None),
-    floor_hall: Optional[str] = Form(""),
-    model_name: Optional[str] = Form("models/gemini-3-pro-image-preview"), # 풀 네임으로 기본값 설정
-):
+async def generate_invitation(request: GenerateInvitationRequest):
     """
-    청첩장 이미지 생성 API (이전 프로젝트 설정: Gemini + Imagen 3.0)
-    """
-    # 받은 데이터 로깅 (모델명 포함)
-    print(f"DEBUG: model_name={model_name}")
-    # 필수 필드 검증
-    missing = []
-    if not wedding_image: missing.append("wedding_image")
-    if not style_image: missing.append("style_image")
-    if not tone: missing.append("tone")
-    if not groom_name: missing.append("groom_name")
-    if not bride_name: missing.append("bride_name")
-    if not venue: missing.append("venue")
-    if not wedding_date: missing.append("wedding_date")
-    if not wedding_time: missing.append("wedding_time")
-    if not address: missing.append("address")
+    청첩장 이미지 생성 API
 
-    if missing:
-        return {"success": False, "error": f"필수 필드가 누락되었습니다: {', '.join(missing)}"}
+    Request Body:
+    {
+        "groom": {"name": "홍길동", "fatherName": "홍부", "motherName": "김씨"},
+        "bride": {"name": "김영희", "fatherName": "김부", "motherName": "이씨"},
+        "wedding": {"hallName": "○○웨딩홀", "address": "서울 ...", "date": "2026-03-21", "time": "14:00"},
+        "weddingImageUrl": "https://...",
+        "styleImageUrl": "https://...",
+        "extraMessage": "주차 공간이 협소합니다",
+        "additionalRequest": "잔잔한 분위기",
+        "tone": "WARM",
+        "frame": "CLASSIC"
+    }
+    """
+    print(f"DEBUG: request={request}")
 
     try:
-        # 이미지 파일을 Base64로 변환
-        wedding_image_bytes = await wedding_image.read()
-        wedding_image_base64 = base64.b64encode(wedding_image_bytes).decode('utf-8')
-
-        style_image_bytes = await style_image.read()
-        style_image_base64 = base64.b64encode(style_image_bytes).decode('utf-8')
+        # URL에서 이미지 다운로드 후 Base64로 변환
+        wedding_image_base64 = download_image_as_base64(request.weddingImageUrl)
+        style_image_base64 = download_image_as_base64(request.styleImageUrl)
 
         # 1. 먼저 Gemini로 문구 생성
         texts_result = generate_wedding_texts(
-            tone=tone,
-            groom_name=groom_name,
-            bride_name=bride_name,
-            groom_father=groom_father,
-            groom_mother=groom_mother,
-            bride_father=bride_father,
-            bride_mother=bride_mother,
-            venue=venue,
-            wedding_date=wedding_date,
-            wedding_time=wedding_time,
-            address=address
+            tone=request.tone,
+            groom_name=request.groom.name,
+            bride_name=request.bride.name,
+            groom_father=request.groom.fatherName,
+            groom_mother=request.groom.motherName,
+            bride_father=request.bride.fatherName,
+            bride_mother=request.bride.motherName,
+            venue=request.wedding.hallName,
+            wedding_date=request.wedding.date,
+            wedding_time=request.wedding.time,
+            address=request.wedding.address
         )
 
-        # 2. Imagen 3.0으로 이미지 생성
+        # 2. 이미지 생성용 텍스트 구성
         processed_texts = {
             "greeting": texts_result.get("greetings", [""])[0],
             "invitation": texts_result.get("invitations", [""])[0],
             "location": texts_result.get("location", ""),
-            "closing": texts_result.get("closing", [""])[0]
+            "closing": texts_result.get("closing", [""])[0],
+            "extraMessage": request.extraMessage,
+            "additionalRequest": request.additionalRequest
         }
 
         venue_info = {
-            "name": venue,
-            "address": address,
-            "latitude": str(latitude) if latitude else None,
-            "longitude": str(longitude) if longitude else None
+            "name": request.wedding.hallName,
+            "address": request.wedding.address
         }
 
-        # Imagen 3.0 디자인 생성 (병렬 처리, 모델명 전달)
+        # Imagen/Gemini 디자인 생성 (이미 S3에 업로드됨)
         result = await generate_invitation_design(
             style_image_base64=style_image_base64,
             wedding_image_base64=wedding_image_base64,
             texts=processed_texts,
             venue_info=venue_info,
-            model_name=model_name
+            model_name=request.modelName
         )
 
-        # 문구 정보도 함께 반환
-        result["texts"] = processed_texts
+        # 이미지 URL 추출 (이미 CloudFront URL)
+        image_urls = [page.get("image_url", "") for page in result.get("pages", [])]
 
-        return {"success": True, "data": result}
+        print(f"✅ 생성 완료: {image_urls}")
+
+        # 응답: 이미지 URL 리스트 + 텍스트
+        return {
+            "success": True,
+            "data": {
+                "imageUrls": image_urls,
+                "texts": processed_texts
+            }
+        }
 
     except Exception as e:
         import traceback
@@ -281,3 +300,22 @@ async def generate_invitation(
             "error": str(e),
             "traceback": traceback.format_exc()
         }
+
+# --- 유틸리티: URL에서 이미지 다운로드 후 Gemini Part로 변환 ---
+def download_image_as_part(url: str) -> types.Part:
+    """URL에서 이미지 다운로드 후 Gemini Part로 반환"""
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+
+    content_type = response.headers.get("Content-Type", "image/png")
+    if ";" in content_type:
+        content_type = content_type.split(";")[0]
+
+    return types.Part.from_bytes(data=response.content, mime_type=content_type)
+
+
+def download_image_as_base64(url: str) -> str:
+    """URL에서 이미지 다운로드 후 base64 문자열로 반환"""
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    return base64.b64encode(response.content).decode('utf-8')

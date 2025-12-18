@@ -19,34 +19,31 @@ from utils.genai_client import get_genai_client
 # .env 파일 로드
 load_dotenv()
 
-# AWS S3 설정 (현재는 로컬 저장 위주이나 유지)
-s3_client = boto3.client(
-    's3',
-    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
-    region_name='ap-northeast-2'
-)
+# AWS S3 설정
+S3_BUCKET = os.environ.get('S3_BUCKET')
+S3_REGION = os.environ.get('S3_REGION', 'ap-northeast-2')
+CLOUD_FRONT_DOMAIN = os.environ.get('CLOUD_FRONT_DOMAIN')
 
-BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'wedding-invitation-images')
+s3_client = boto3.client('s3', region_name=S3_REGION)
 
-# 로컬 저장 경로 설정
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, "static")
-GENERATED_DIR = os.path.join(STATIC_DIR, "generated_images")
-MODEL_SERVER_URL = os.environ.get('MODEL_SERVER_URL', 'http://localhost:8102')
 
-def save_locally(image_bytes: bytes, file_type: str = "design") -> str:
-    """생성된 이미지를 로컬 파일 시스템에 저장하고 URL을 반환"""
-    if not os.path.exists(GENERATED_DIR):
-        os.makedirs(GENERATED_DIR, exist_ok=True)
-        
-    filename = f"{file_type}_{uuid.uuid4()}.png"
-    filepath = os.path.join(GENERATED_DIR, filename)
-    
-    with open(filepath, "wb") as f:
-        f.write(image_bytes)
-        
-    return f"{MODEL_SERVER_URL}/static/generated_images/{filename}"
+def save_to_s3(image_bytes: bytes, file_type: str = "design") -> str:
+    """생성된 이미지를 S3에 업로드하고 CloudFront URL을 반환"""
+    import io
+    import time
+
+    timestamp = int(time.time())
+    filename = f"invitations/{file_type}_{timestamp}_{uuid.uuid4().hex[:8]}.png"
+
+    buffer = io.BytesIO(image_bytes)
+    s3_client.upload_fileobj(
+        buffer,
+        S3_BUCKET,
+        filename,
+        ExtraArgs={"ContentType": "image/png"}
+    )
+
+    return f"{CLOUD_FRONT_DOMAIN}/{filename}"
 
 async def generate_invitation_design(
     style_image_base64: str,
@@ -169,7 +166,7 @@ def _generate_single_page_sync(prompt: str, content_image_base64: Optional[str],
                 from io import BytesIO
                 img_buffer = BytesIO()
                 result.generated_images[0].image.save(img_buffer, format='PNG')
-                return save_locally(img_buffer.getvalue(), "design-imagen")
+                return save_to_s3(img_buffer.getvalue(), "design-imagen")
                 
         else:
             # Gemini 3 Pro 설정 (속도 최적화를 위해 불필요한 도구 제거)
@@ -194,7 +191,7 @@ def _generate_single_page_sync(prompt: str, content_image_base64: Optional[str],
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
                     if part.inline_data:
-                        return save_locally(part.inline_data.data, "design-gemini")
+                        return save_to_s3(part.inline_data.data, "design-gemini")
             
     except Exception as e:
         print(f"❌ [Page] Failed with {full_model_name}: {e}")
