@@ -1,0 +1,49 @@
+# Environment variables (API 키 포함)
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+.venv_py31018/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+nohup.out
+*.out
+
+# Backup files
+*.bak
+*_bak
+*.backup
+
+# Test outputs
+test_*.png
+test_*.jpg
+output_*.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp

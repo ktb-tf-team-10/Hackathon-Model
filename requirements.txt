@@ -1,0 +1,28 @@
+# Google AI APIs
+google-genai==1.53.0
+google-cloud-aiplatform==1.60.0
+certifi>=2023.7.22
+
+# AWS S3
+boto3==1.34.69
+
+# Image processing
+Pillow==10.3.0
+
+# HTTP requests
+requests==2.31.0
+urllib3>=2.0.0
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Template engine (프롬프트 로더용)
+Jinja2==3.1.2
+
+# FastAPI and server
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+
+# Type hints
+typing-extensions==4.11.0
